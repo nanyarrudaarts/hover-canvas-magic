@@ -1,11 +1,13 @@
 /**
- * Hover-driven frame animation
+ * Hover-driven frame animation — hotspots
  * ------------------------------------------------------------
- * - Eixo X do mouse (0 → 1) mapeado linearmente para o intervalo
- *   de frames [FRAME_START, FRAME_END].
- * - Preload de todos os frames em cache (array de HTMLImageElement).
- * - Redesenho no canvas via requestAnimationFrame apenas quando o
- *   índice do frame realmente muda.
+ * - A composição possui 5 hotspots invisíveis (sem overlay, sem tooltip).
+ * - Cada hotspot é um polígono definido em porcentagem da imagem
+ *   (0..1), portanto acompanha o canvas em qualquer tamanho de tela.
+ * - Mouse entra na área → reproduz a sequência de frames do objeto.
+ * - Mouse sai da área → a sequência volta ao início (estado inicial).
+ * - Preload de todos os frames em cache; redesenho via
+ *   requestAnimationFrame apenas quando o índice do frame muda.
  * - Nomes gerados dinamicamente com padding de 3 dígitos.
  */
 (function () {
@@ -13,15 +15,53 @@
 
   // ---------- Configuração ----------
   const CONFIG = {
-    path: "../frames/",          // pasta onde estão os frames
-    prefix: "ezgif-frame-",       // prefixo do nome do arquivo
-    extension: ".jpg",            // extensão (frames otimizados para web)
-    frameStart: 25,               // ezgif-frame-025
-    frameEnd: 232,                // ezgif-frame-232 (sequência completa)
-    padLength: 3,                 // ezgif-frame-XXX
+    path: "../frames/",
+    prefix: "ezgif-frame-",
+    extension: ".jpg",
+    padLength: 3,
+    baseFrame: 25,   // frame exibido em repouso
+    fps: 30,         // velocidade base de reprodução (frames por segundo)
   };
 
   const DEFAULTS = { speed: 1, precision: 100 };
+
+  /**
+   * Hotspots — coordenadas em fração da imagem (x/1600, y/900).
+   * A ordem define a prioridade quando há sobreposição visual:
+   * os objetos mais à frente vêm primeiro.
+   */
+  const HOTSPOTS = [
+    {
+      id: "sticker",
+      start: 203,
+      end: 232,
+      polygon: [[0.459, 0.517], [0.525, 0.517], [0.525, 0.600], [0.459, 0.600]],
+    },
+    {
+      id: "micard",
+      start: 159,
+      end: 191,
+      polygon: [[0.398, 0.500], [0.438, 0.494], [0.446, 0.606], [0.405, 0.606]],
+    },
+    {
+      id: "postcard",
+      start: 108,
+      end: 141,
+      polygon: [[0.537, 0.439], [0.603, 0.450], [0.600, 0.556], [0.550, 0.583], [0.531, 0.522]],
+    },
+    {
+      id: "fineart",
+      start: 51,
+      end: 100,
+      polygon: [[0.403, 0.394], [0.500, 0.387], [0.501, 0.528], [0.406, 0.528]],
+    },
+    {
+      id: "carta",
+      start: 25,
+      end: 50,
+      polygon: [[0.459, 0.322], [0.597, 0.314], [0.600, 0.444], [0.544, 0.472], [0.500, 0.450], [0.500, 0.391], [0.459, 0.394]],
+    },
+  ];
 
   // ---------- Elementos ----------
   const container = document.getElementById("animation-container");
@@ -39,51 +79,76 @@
   const resetButton = document.getElementById("reset");
 
   // ---------- Estado ----------
-  const frames = [];          // cache: índice 0 → frameStart, ..., n-1 → frameEnd
-  const totalFrames = CONFIG.frameEnd - CONFIG.frameStart + 1;
-  let currentIndex = -1;      // índice atualmente desenhado
-  let targetPos = 0;          // posição alvo normalizada (0..1) vinda do mouse
-  let smoothPos = 0;          // posição suavizada efetivamente desenhada
-  let lastClientX = null;     // último X para calcular o delta
-  let rafId = null;           // id do requestAnimationFrame pendente
+  const frames = new Map();      // número do frame → HTMLImageElement | null
+  const neededFrames = [];       // lista de todos os frames a carregar
+  HOTSPOTS.forEach((h) => {
+    for (let n = h.start; n <= h.end; n++) neededFrames.push(n);
+  });
+  if (!neededFrames.includes(CONFIG.baseFrame)) neededFrames.push(CONFIG.baseFrame);
 
-  let speed = DEFAULTS.speed;             // multiplicador de velocidade
-  let precision = DEFAULTS.precision / 100; // 1 = sem suavização
+  let currentFrame = -1;         // frame atualmente desenhado
+  let activeHotspot = null;      // hotspot sob o cursor (ou null)
+  let playingHotspot = null;     // hotspot cuja sequência está na tela
+  let playhead = 0;              // posição (float) dentro da sequência
+  let rafId = null;
+  let lastTime = null;
+
+  let speed = DEFAULTS.speed;
+  let precision = DEFAULTS.precision / 100;
 
   // ---------- Utilidades ----------
 
-  /** Gera o nome do arquivo com padding de 3 dígitos: ezgif-frame-025.png */
+  /** ezgif-frame-025.jpg */
   function frameFileName(frameNumber) {
     return `${CONFIG.path}${CONFIG.prefix}${String(frameNumber).padStart(CONFIG.padLength, "0")}${CONFIG.extension}`;
   }
 
-  const clamp01 = (v) => Math.min(1, Math.max(0, v));
+  const clamp = (v, min, max) => Math.min(max, Math.max(min, v));
 
-  /** Mapeia 0..1 → índice de frame (0..totalFrames-1), arredondado */
-  function percentToIndex(percent) {
-    return Math.round(percent * (totalFrames - 1));
+  /** Se um frame não carregou, usa o frame vizinho mais próximo da mesma sequência. */
+  function resolveFrame(frameNumber, hotspot) {
+    if (frames.get(frameNumber)) return frames.get(frameNumber);
+    const lo = hotspot ? hotspot.start : CONFIG.baseFrame;
+    const hi = hotspot ? hotspot.end : CONFIG.baseFrame;
+    for (let offset = 1; offset <= hi - lo; offset++) {
+      const a = frameNumber - offset;
+      const b = frameNumber + offset;
+      if (a >= lo && frames.get(a)) return frames.get(a);
+      if (b <= hi && frames.get(b)) return frames.get(b);
+    }
+    return frames.get(CONFIG.baseFrame) || null;
   }
 
-  /**
-   * Alguns frames podem faltar na sequência. Se o frame pedido não carregou,
-   * usa o frame válido mais próximo já em cache.
-   */
-  function resolveFrame(index) {
-    if (frames[index]) return frames[index];
-    for (let offset = 1; offset < totalFrames; offset++) {
-      if (frames[index - offset]) return frames[index - offset];
-      if (frames[index + offset]) return frames[index + offset];
+  /** Teste ponto-em-polígono (ray casting). */
+  function pointInPolygon(x, y, polygon) {
+    let inside = false;
+    for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+      const [xi, yi] = polygon[i];
+      const [xj, yj] = polygon[j];
+      const intersect = yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi;
+      if (intersect) inside = !inside;
+    }
+    return inside;
+  }
+
+  /** Converte clientX/Y em fração da imagem e devolve o hotspot correspondente. */
+  function hotspotAt(clientX, clientY) {
+    const rect = canvas.getBoundingClientRect();
+    const x = (clientX - rect.left) / rect.width;
+    const y = (clientY - rect.top) / rect.height;
+    if (x < 0 || x > 1 || y < 0 || y > 1) return null;
+    for (const h of HOTSPOTS) {
+      if (pointInPolygon(x, y, h.polygon)) return h;
     }
     return null;
   }
 
   // ---------- Renderização ----------
 
-  function drawFrame(index) {
-    const img = resolveFrame(index);
+  function drawFrame(frameNumber, hotspot) {
+    const img = resolveFrame(frameNumber, hotspot);
     if (!img) return;
 
-    // Ajusta a resolução interna do canvas à da imagem (uma vez)
     if (canvas.width !== img.naturalWidth || canvas.height !== img.naturalHeight) {
       canvas.width = img.naturalWidth;
       canvas.height = img.naturalHeight;
@@ -91,73 +156,106 @@
 
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-    currentIndex = index;
+    currentFrame = frameNumber;
   }
 
   /**
-   * Loop de animação: aproxima smoothPos de targetPos conforme a precisão
-   * e só redesenha quando o índice de frame muda.
+   * Loop: avança o playhead em direção ao alvo (fim da sequência enquanto o
+   * cursor está sobre o objeto; início quando sai) e só redesenha quando o
+   * frame inteiro muda.
    */
-  function tick() {
+  function tick(now) {
     rafId = null;
+    const dt = lastTime === null ? 0 : Math.min(0.1, (now - lastTime) / 1000);
+    lastTime = now;
 
-    const diff = targetPos - smoothPos;
-    if (precision >= 1 || Math.abs(diff) < 0.0005) {
-      smoothPos = targetPos;
-    } else {
-      smoothPos += diff * precision;
+    if (!playingHotspot) {
+      if (currentFrame !== CONFIG.baseFrame) drawFrame(CONFIG.baseFrame, null);
+      lastTime = null;
+      return;
     }
 
-    const nextIndex = percentToIndex(smoothPos);
-    if (nextIndex !== currentIndex) drawFrame(nextIndex);
+    const length = playingHotspot.end - playingHotspot.start;
+    const target = activeHotspot === playingHotspot ? length : 0;
+    const diff = target - playhead;
 
-    if (smoothPos !== targetPos) scheduleRender();
+    // passo linear (frames/s) com suavização opcional perto do alvo
+    let step = CONFIG.fps * speed * dt;
+    if (precision < 1) {
+      const ease = clamp(Math.abs(diff) / 8, 0.08, 1);
+      step *= precision + (1 - precision) * ease;
+    }
+
+    if (Math.abs(diff) <= step) playhead = target;
+    else playhead += Math.sign(diff) * step;
+
+    const frameNumber = playingHotspot.start + Math.round(playhead);
+    if (frameNumber !== currentFrame) drawFrame(frameNumber, playingHotspot);
+
+    if (playhead !== target) {
+      scheduleRender();
+    } else if (target === 0 && activeHotspot !== playingHotspot) {
+      // sequência voltou ao início: libera para o próximo objeto
+      playingHotspot = null;
+      lastTime = null;
+      if (activeHotspot) startHotspot(activeHotspot);
+      else if (currentFrame !== CONFIG.baseFrame) drawFrame(CONFIG.baseFrame, null);
+    } else {
+      lastTime = null;
+    }
   }
 
-  /** Agenda um redesenho só se ainda não houver um pendente */
   function scheduleRender() {
     if (rafId !== null) return;
     rafId = requestAnimationFrame(tick);
   }
 
-  // ---------- Interação ----------
-
-  function handlePointerMove(clientX) {
-    const rect = container.getBoundingClientRect();
-
-    if (lastClientX === null) {
-      // primeira leitura: posição absoluta dentro do contêiner
-      targetPos = clamp01((clientX - rect.left) / rect.width);
-    } else {
-      // demais leituras: deslocamento relativo escalado pela velocidade
-      targetPos = clamp01(targetPos + ((clientX - lastClientX) / rect.width) * speed);
-    }
-
-    lastClientX = clientX;
-    container.classList.add("interacted");
+  function startHotspot(hotspot) {
+    playingHotspot = hotspot;
+    playhead = 0;
+    lastTime = null;
     scheduleRender();
   }
 
-  function bindEvents() {
-    container.addEventListener("mousemove", (e) => handlePointerMove(e.clientX), { passive: true });
-    container.addEventListener("mouseleave", () => { lastClientX = null; }, { passive: true });
+  // ---------- Interação ----------
 
-    // Suporte opcional a toque (arrastar o dedo na horizontal)
-    container.addEventListener(
-      "touchstart",
-      (e) => {
-        if (e.touches.length > 0) lastClientX = e.touches[0].clientX;
-      },
-      { passive: true }
-    );
-    container.addEventListener(
-      "touchmove",
-      (e) => {
-        if (e.touches.length > 0) handlePointerMove(e.touches[0].clientX);
-      },
-      { passive: true }
-    );
-    container.addEventListener("touchend", () => { lastClientX = null; }, { passive: true });
+  function setActiveHotspot(hotspot) {
+    if (hotspot === activeHotspot) return;
+    activeHotspot = hotspot;
+    container.classList.toggle("over-hotspot", !!hotspot);
+    if (hotspot) container.classList.add("interacted");
+
+    if (!playingHotspot) {
+      if (hotspot) startHotspot(hotspot);
+      return;
+    }
+
+    if (hotspot && hotspot !== playingHotspot && playhead === 0) {
+      // sequência anterior já estava no início: troca imediatamente
+      startHotspot(hotspot);
+      return;
+    }
+
+    // caso contrário o loop cuida: rebobina a atual e depois inicia a nova
+    scheduleRender();
+  }
+
+  function handlePointer(clientX, clientY) {
+    setActiveHotspot(hotspotAt(clientX, clientY));
+  }
+
+  function bindEvents() {
+    container.addEventListener("mousemove", (e) => handlePointer(e.clientX, e.clientY), { passive: true });
+    container.addEventListener("mouseleave", () => setActiveHotspot(null), { passive: true });
+
+    // Toque: tocar/arrastar sobre um objeto dispara sua sequência
+    const touch = (e) => {
+      if (e.touches.length > 0) handlePointer(e.touches[0].clientX, e.touches[0].clientY);
+    };
+    container.addEventListener("touchstart", touch, { passive: true });
+    container.addEventListener("touchmove", touch, { passive: true });
+    container.addEventListener("touchend", () => setActiveHotspot(null), { passive: true });
+    container.addEventListener("touchcancel", () => setActiveHotspot(null), { passive: true });
   }
 
   // ---------- Painel de ajustes ----------
@@ -176,9 +274,11 @@
   }
 
   function bindControls() {
-    // impede que interagir com o painel mexa na animação
-    ["mousemove", "touchmove"].forEach((type) =>
+    ["mousemove", "touchstart", "touchmove"].forEach((type) =>
       controls.addEventListener(type, (e) => e.stopPropagation())
+    );
+    ["mousemove", "touchstart", "touchmove"].forEach((type) =>
+      controlsToggle.addEventListener(type, (e) => e.stopPropagation())
     );
 
     controlsToggle.addEventListener("click", () => {
@@ -198,46 +298,37 @@
     applyPrecision(DEFAULTS.precision);
   }
 
-
   // ---------- Preload ----------
 
   function updateLoader(loaded) {
-    const pct = Math.round((loaded / totalFrames) * 100);
+    const pct = Math.round((loaded / neededFrames.length) * 100);
     loaderFill.style.width = pct + "%";
     loaderText.textContent = `Carregando frames… ${pct}%`;
   }
 
-  /**
-   * Carrega todas as imagens em cache antes de liberar a interação.
-   * Resolve mesmo que alguns frames falhem (eles são tratados em resolveFrame).
-   */
   function preloadFrames() {
     return new Promise((resolve) => {
       let settled = 0;
-
       const onSettle = () => {
         settled++;
         updateLoader(settled);
-        if (settled === totalFrames) resolve();
+        if (settled === neededFrames.length) resolve();
       };
 
-      for (let i = 0; i < totalFrames; i++) {
-        const frameNumber = CONFIG.frameStart + i;
+      neededFrames.forEach((frameNumber) => {
         const img = new Image();
         img.decoding = "async";
-
         img.onload = () => {
-          frames[i] = img;
+          frames.set(frameNumber, img);
           onSettle();
         };
         img.onerror = () => {
-          frames[i] = null;
+          frames.set(frameNumber, null);
           console.warn("Frame não encontrado:", frameFileName(frameNumber));
           onSettle();
         };
-
         img.src = frameFileName(frameNumber);
-      }
+      });
     });
   }
 
@@ -248,10 +339,9 @@
     await preloadFrames();
 
     loader.classList.add("hidden");
-    drawFrame(0); // frame inicial (ezgif-frame-025)
+    drawFrame(CONFIG.baseFrame, null);
     bindEvents();
   }
-
 
   init();
 })();
