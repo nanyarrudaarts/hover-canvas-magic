@@ -21,6 +21,8 @@
     padLength: 3,                 // ezgif-frame-XXX
   };
 
+  const DEFAULTS = { speed: 1, precision: 100 };
+
   // ---------- Elementos ----------
   const container = document.getElementById("animation-container");
   const canvas = document.getElementById("animation-canvas");
@@ -28,13 +30,25 @@
   const loader = document.getElementById("loader");
   const loaderFill = document.getElementById("loader-fill");
   const loaderText = document.getElementById("loader-text");
+  const controls = document.getElementById("controls");
+  const controlsToggle = document.getElementById("controls-toggle");
+  const speedInput = document.getElementById("speed");
+  const speedValue = document.getElementById("speed-value");
+  const precisionInput = document.getElementById("precision");
+  const precisionValue = document.getElementById("precision-value");
+  const resetButton = document.getElementById("reset");
 
   // ---------- Estado ----------
   const frames = [];          // cache: índice 0 → frameStart, ..., n-1 → frameEnd
   const totalFrames = CONFIG.frameEnd - CONFIG.frameStart + 1;
   let currentIndex = -1;      // índice atualmente desenhado
-  let targetIndex = 0;        // índice pedido pelo mouse
+  let targetPos = 0;          // posição alvo normalizada (0..1) vinda do mouse
+  let smoothPos = 0;          // posição suavizada efetivamente desenhada
+  let lastClientX = null;     // último X para calcular o delta
   let rafId = null;           // id do requestAnimationFrame pendente
+
+  let speed = DEFAULTS.speed;             // multiplicador de velocidade
+  let precision = DEFAULTS.precision / 100; // 1 = sem suavização
 
   // ---------- Utilidades ----------
 
@@ -43,12 +57,7 @@
     return `${CONFIG.path}${CONFIG.prefix}${String(frameNumber).padStart(CONFIG.padLength, "0")}${CONFIG.extension}`;
   }
 
-  /** Converte a posição X do cursor em porcentagem normalizada 0..1 */
-  function normalizeX(clientX) {
-    const rect = container.getBoundingClientRect();
-    const x = clientX - rect.left;
-    return Math.min(1, Math.max(0, x / rect.width));
-  }
+  const clamp01 = (v) => Math.min(1, Math.max(0, v));
 
   /** Mapeia 0..1 → índice de frame (0..totalFrames-1), arredondado */
   function percentToIndex(percent) {
@@ -85,35 +94,62 @@
     currentIndex = index;
   }
 
+  /**
+   * Loop de animação: aproxima smoothPos de targetPos conforme a precisão
+   * e só redesenha quando o índice de frame muda.
+   */
+  function tick() {
+    rafId = null;
+
+    const diff = targetPos - smoothPos;
+    if (precision >= 1 || Math.abs(diff) < 0.0005) {
+      smoothPos = targetPos;
+    } else {
+      smoothPos += diff * precision;
+    }
+
+    const nextIndex = percentToIndex(smoothPos);
+    if (nextIndex !== currentIndex) drawFrame(nextIndex);
+
+    if (smoothPos !== targetPos) scheduleRender();
+  }
+
   /** Agenda um redesenho só se ainda não houver um pendente */
   function scheduleRender() {
     if (rafId !== null) return;
-    rafId = requestAnimationFrame(() => {
-      rafId = null;
-      if (targetIndex !== currentIndex) {
-        drawFrame(targetIndex);
-      }
-    });
+    rafId = requestAnimationFrame(tick);
   }
 
   // ---------- Interação ----------
 
   function handlePointerMove(clientX) {
-    const percent = normalizeX(clientX);
-    const nextIndex = percentToIndex(percent);
+    const rect = container.getBoundingClientRect();
 
-    // Evita trabalho desnecessário se o frame não mudou
-    if (nextIndex === targetIndex) return;
+    if (lastClientX === null) {
+      // primeira leitura: posição absoluta dentro do contêiner
+      targetPos = clamp01((clientX - rect.left) / rect.width);
+    } else {
+      // demais leituras: deslocamento relativo escalado pela velocidade
+      targetPos = clamp01(targetPos + ((clientX - lastClientX) / rect.width) * speed);
+    }
 
-    targetIndex = nextIndex;
+    lastClientX = clientX;
     container.classList.add("interacted");
     scheduleRender();
   }
 
   function bindEvents() {
     container.addEventListener("mousemove", (e) => handlePointerMove(e.clientX), { passive: true });
+    container.addEventListener("mouseleave", () => { lastClientX = null; }, { passive: true });
 
     // Suporte opcional a toque (arrastar o dedo na horizontal)
+    container.addEventListener(
+      "touchstart",
+      (e) => {
+        if (e.touches.length > 0) lastClientX = e.touches[0].clientX;
+      },
+      { passive: true }
+    );
     container.addEventListener(
       "touchmove",
       (e) => {
@@ -121,7 +157,47 @@
       },
       { passive: true }
     );
+    container.addEventListener("touchend", () => { lastClientX = null; }, { passive: true });
   }
+
+  // ---------- Painel de ajustes ----------
+
+  function applySpeed(value) {
+    speed = Number(value);
+    speedInput.value = String(speed);
+    speedValue.textContent = speed.toFixed(1) + "×";
+  }
+
+  function applyPrecision(value) {
+    const pct = Number(value);
+    precision = pct / 100;
+    precisionInput.value = String(pct);
+    precisionValue.textContent = pct + "%";
+  }
+
+  function bindControls() {
+    // impede que interagir com o painel mexa na animação
+    ["mousemove", "touchmove"].forEach((type) =>
+      controls.addEventListener(type, (e) => e.stopPropagation())
+    );
+
+    controlsToggle.addEventListener("click", () => {
+      const collapsed = controls.classList.toggle("collapsed");
+      controlsToggle.setAttribute("aria-expanded", String(!collapsed));
+    });
+
+    speedInput.addEventListener("input", (e) => applySpeed(e.target.value));
+    precisionInput.addEventListener("input", (e) => applyPrecision(e.target.value));
+
+    resetButton.addEventListener("click", () => {
+      applySpeed(DEFAULTS.speed);
+      applyPrecision(DEFAULTS.precision);
+    });
+
+    applySpeed(DEFAULTS.speed);
+    applyPrecision(DEFAULTS.precision);
+  }
+
 
   // ---------- Preload ----------
 
@@ -168,12 +244,14 @@
   // ---------- Inicialização ----------
 
   async function init() {
+    bindControls();
     await preloadFrames();
 
     loader.classList.add("hidden");
     drawFrame(0); // frame inicial (ezgif-frame-025)
     bindEvents();
   }
+
 
   init();
 })();
