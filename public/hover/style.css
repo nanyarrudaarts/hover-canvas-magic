@@ -96,9 +96,98 @@ body {
   opacity: 0;
 }
 
+/* ---------- Painel de ajustes ---------- */
+#controls-toggle,
+#reset {
+  font: inherit;
+  font-size: 0.7rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.28);
+  border: 1px solid rgba(255, 255, 255, 0.45);
+  border-radius: 999px;
+  padding: 8px 16px;
+  cursor: pointer;
+  transition: background 0.2s ease, border-color 0.2s ease;
+}
+
+#controls-toggle:hover,
+#reset:hover {
+  background: rgba(0, 0, 0, 0.45);
+  border-color: #fff;
+}
+
+#controls-toggle {
+  position: absolute;
+  top: 20px;
+  right: 20px;
+  z-index: 3;
+}
+
+#controls {
+  position: absolute;
+  top: 64px;
+  right: 20px;
+  z-index: 3;
+  width: min(280px, calc(100vw - 40px));
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 18px;
+  border-radius: 16px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  backdrop-filter: blur(10px);
+  transition: opacity 0.25s ease, transform 0.25s ease;
+}
+
+#controls.collapsed {
+  opacity: 0;
+  transform: translateY(-8px);
+  pointer-events: none;
+}
+
+.control {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.control-label {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-size: 0.7rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.control output {
+  font-variant-numeric: tabular-nums;
+  opacity: 0.85;
+}
+
+.control small {
+  font-size: 0.65rem;
+  line-height: 1.4;
+  opacity: 0.6;
+}
+
+.control input[type="range"] {
+  width: 100%;
+  accent-color: #fff;
+  cursor: pointer;
+}
+
+#reset {
+  align-self: flex-start;
+}
+
 @media (max-width: 600px) {
   #hint {
     font-size: 0.65rem;
     bottom: 16px;
   }
 }
+
