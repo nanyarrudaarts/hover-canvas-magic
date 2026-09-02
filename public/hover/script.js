@@ -137,11 +137,35 @@
     const x = (clientX - rect.left) / rect.width;
     const y = (clientY - rect.top) / rect.height;
     if (x < 0 || x > 1 || y < 0 || y > 1) return null;
+    // Histerese: se o cursor ainda está sobre o hotspot ativo (com uma
+    // pequena margem), mantém a seleção — evita "pulos" na borda.
+    if (activeHotspot && pointInPolygon(x, y, expandedPolygon(activeHotspot))) {
+      return activeHotspot;
+    }
     for (const h of HOTSPOTS) {
       if (pointInPolygon(x, y, h.polygon)) return h;
     }
     return null;
   }
+
+  /** Polígono levemente expandido a partir do centro (margem de tolerância). */
+  const expandedCache = new WeakMap();
+  function expandedPolygon(hotspot) {
+    const margin = 0.01 + (1 - precision) * 0.05;
+    const cached = expandedCache.get(hotspot);
+    if (cached && cached.margin === margin) return cached.polygon;
+    const cx = hotspot.polygon.reduce((s, p) => s + p[0], 0) / hotspot.polygon.length;
+    const cy = hotspot.polygon.reduce((s, p) => s + p[1], 0) / hotspot.polygon.length;
+    const polygon = hotspot.polygon.map(([px, py]) => {
+      const dx = px - cx;
+      const dy = py - cy;
+      const len = Math.hypot(dx, dy) || 1;
+      return [px + (dx / len) * margin, py + (dy / len) * margin];
+    });
+    expandedCache.set(hotspot, { margin, polygon });
+    return polygon;
+  }
+
 
   // ---------- Renderização ----------
 
