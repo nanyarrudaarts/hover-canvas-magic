@@ -179,15 +179,17 @@
     const target = activeHotspot === playingHotspot ? length : 0;
     const diff = target - playhead;
 
-    // passo linear (frames/s) com suavização opcional perto do alvo
-    let step = CONFIG.fps * speed * dt;
-    if (precision < 1) {
-      const ease = clamp(Math.abs(diff) / 8, 0.08, 1);
-      step *= precision + (1 - precision) * ease;
-    }
+    // Suavização exponencial (ease-out): rápido no início, desacelera ao
+    // chegar no alvo e para totalmente — o quadro final fica estático.
+    const rate = CONFIG.fps * speed * 0.22; // constante de suavização
+    const eased = diff * (1 - Math.exp(-rate * dt));
+    const minStep = CONFIG.fps * speed * 0.15 * dt; // evita ficar lento demais
+    let delta = Math.abs(eased) < minStep ? Math.sign(diff) * minStep : eased;
+    if (Math.abs(delta) > Math.abs(diff)) delta = diff;
 
-    if (Math.abs(diff) <= step) playhead = target;
-    else playhead += Math.sign(diff) * step;
+    if (Math.abs(diff) <= 0.02) playhead = target;
+    else playhead += delta;
+
 
     const frameNumber = playingHotspot.start + Math.round(playhead);
     if (frameNumber !== currentFrame) drawFrame(frameNumber, playingHotspot);
