@@ -245,7 +245,10 @@
 
   // ---------- Interação ----------
 
-  function setActiveHotspot(hotspot) {
+  let pendingHotspot = null;
+  let pendingTimer = null;
+
+  function commitHotspot(hotspot) {
     if (hotspot === activeHotspot) return;
     activeHotspot = hotspot;
     container.classList.toggle("over-hotspot", !!hotspot);
@@ -266,9 +269,36 @@
     scheduleRender();
   }
 
+  /**
+   * Só confirma a mudança se o cursor permanecer na nova região por um
+   * curto período — impede que os elementos fiquem pulando.
+   */
+  function setActiveHotspot(hotspot) {
+    if (hotspot === activeHotspot) {
+      pendingHotspot = null;
+      if (pendingTimer !== null) {
+        clearTimeout(pendingTimer);
+        pendingTimer = null;
+      }
+      return;
+    }
+    if (hotspot === pendingHotspot) return;
+
+    pendingHotspot = hotspot;
+    if (pendingTimer !== null) clearTimeout(pendingTimer);
+
+    // entrar a partir do repouso é imediato; sair ou trocar tem carência
+    const delay = activeHotspot === null ? 0 : 70 + (1 - precision) * 260;
+    pendingTimer = window.setTimeout(() => {
+      pendingTimer = null;
+      commitHotspot(pendingHotspot);
+    }, delay);
+  }
+
   function handlePointer(clientX, clientY) {
     setActiveHotspot(hotspotAt(clientX, clientY));
   }
+
 
   function bindEvents() {
     container.addEventListener("mousemove", (e) => handlePointer(e.clientX, e.clientY), { passive: true });
