@@ -1,14 +1,14 @@
 /**
- * Hover-driven frame animation — hotspots
+ * Hover-driven frame animation — hotspots + PAUSE FRAME CONTROL
  * ------------------------------------------------------------
- * - A composição possui 5 hotspots invisíveis (sem overlay, sem tooltip).
- * - Cada hotspot é um polígono definido em porcentagem da imagem
- *   (0..1), portanto acompanha o canvas em qualquer tamanho de tela.
- * - Mouse entra na área → reproduz a sequência de frames do objeto.
- * - Mouse sai da área → a sequência volta ao início (estado inicial).
- * - Preload de todos os frames em cache; redesenho via
- *   requestAnimationFrame apenas quando o índice do frame muda.
- * - Nomes gerados dinamicamente com padding de 3 dígitos.
+ * - 5 hotspots invisíveis (polígonos em fração da imagem, 0..1).
+ * - Máquina de estados por sequência:
+ *     IDLE → PLAYING_TO_PAUSE → PAUSED_AT_TARGET → PLAYING_TO_END → FINISHED
+ * - Mouse entra → reproduz do primeiro frame até o frame de pausa e CONGELA.
+ * - Mouse sai   → continua do frame de pausa até o último frame e PARA.
+ * - Playback baseado em tempo (requestAnimationFrame + duração fixa por
+ *   frame) com crossfade entre frames vizinhos para eliminar saltos.
+ * - Mover o mouse dentro do hotspot nunca reinicia a animação.
  */
 (function () {
   "use strict";
@@ -19,49 +19,50 @@
     prefix: "ezgif-frame-",
     extension: ".jpg",
     padLength: 3,
-    baseFrame: 25,   // frame exibido em repouso
-    fps: 30,         // velocidade base de reprodução (frames por segundo)
+    baseFrame: 25,        // frame exibido em repouso
+    frameDuration: 70,    // ms por frame em 1×
+    crossfade: true,      // mistura suave entre frames vizinhos
+    rushFactor: 2.2,      // acelera o encerramento quando outro objeto aguarda
   };
 
   const DEFAULTS = { speed: 1, precision: 100 };
 
-  /**
-   * Hotspots — coordenadas em fração da imagem (x/1600, y/900).
-   * A ordem define a prioridade quando há sobreposição visual:
-   * os objetos mais à frente vêm primeiro.
-   */
+  /** Hotspots — ordem = prioridade em sobreposição (frente primeiro). */
   const HOTSPOTS = [
     {
       id: "sticker",
-      start: 203,
-      end: 232,
+      start: 203, pause: 218, end: 232,
       polygon: [[0.459, 0.517], [0.525, 0.517], [0.525, 0.600], [0.459, 0.600]],
     },
     {
       id: "micard",
-      start: 159,
-      end: 191,
+      start: 159, pause: 179, end: 191,
       polygon: [[0.398, 0.500], [0.438, 0.494], [0.446, 0.606], [0.405, 0.606]],
     },
     {
       id: "postcard",
-      start: 108,
-      end: 141,
+      start: 108, pause: 129, end: 141,
       polygon: [[0.537, 0.439], [0.603, 0.450], [0.600, 0.556], [0.550, 0.583], [0.531, 0.522]],
     },
     {
       id: "fineart",
-      start: 51,
-      end: 100,
+      start: 51, pause: 81, end: 100,
       polygon: [[0.403, 0.394], [0.500, 0.387], [0.501, 0.528], [0.406, 0.528]],
     },
     {
       id: "carta",
-      start: 25,
-      end: 50,
+      start: 25, pause: 31, end: 50,
       polygon: [[0.459, 0.322], [0.597, 0.314], [0.600, 0.444], [0.544, 0.472], [0.500, 0.450], [0.500, 0.391], [0.459, 0.394]],
     },
   ];
+
+  const STATE = {
+    IDLE: "IDLE",
+    PLAYING_TO_PAUSE: "PLAYING_TO_PAUSE",
+    PAUSED_AT_TARGET: "PAUSED_AT_TARGET",
+    PLAYING_TO_END: "PLAYING_TO_END",
+    FINISHED: "FINISHED",
+  };
 
   // ---------- Elementos ----------
   const container = document.getElementById("animation-container");
@@ -79,17 +80,21 @@
   const resetButton = document.getElementById("reset");
 
   // ---------- Estado ----------
-  const frames = new Map();      // número do frame → HTMLImageElement | null
-  const neededFrames = [];       // lista de todos os frames a carregar
+  const frames = new Map();
+  const neededFrames = [];
   HOTSPOTS.forEach((h) => {
     for (let n = h.start; n <= h.end; n++) neededFrames.push(n);
   });
   if (!neededFrames.includes(CONFIG.baseFrame)) neededFrames.push(CONFIG.baseFrame);
 
-  let currentFrame = -1;         // frame atualmente desenhado
-  let activeHotspot = null;      // hotspot sob o cursor (ou null)
-  let playingHotspot = null;     // hotspot cuja sequência está na tela
-  let playhead = 0;              // posição (float) dentro da sequência
+  /**
+   * Sequência em exibição (apenas uma por vez, pois há um único canvas):
+   * { hotspot, state, pos (float, índice dentro da sequência), skipPause, rush }
+   */
+  let seq = null;
+  let hovered = null;        // hotspot sob o cursor (após estabilização)
+  let pendingStart = null;   // hotspot que aguarda a sequência atual terminar
+  let lastDrawKey = "";      // evita redesenho sem mudança
   let rafId = null;
   let lastTime = null;
 
@@ -98,14 +103,10 @@
 
   // ---------- Utilidades ----------
 
-  /** ezgif-frame-025.jpg */
   function frameFileName(frameNumber) {
     return `${CONFIG.path}${CONFIG.prefix}${String(frameNumber).padStart(CONFIG.padLength, "0")}${CONFIG.extension}`;
   }
 
-  const clamp = (v, min, max) => Math.min(max, Math.max(min, v));
-
-  /** Se um frame não carregou, usa o frame vizinho mais próximo da mesma sequência. */
   function resolveFrame(frameNumber, hotspot) {
     if (frames.get(frameNumber)) return frames.get(frameNumber);
     const lo = hotspot ? hotspot.start : CONFIG.baseFrame;
@@ -119,7 +120,6 @@
     return frames.get(CONFIG.baseFrame) || null;
   }
 
-  /** Teste ponto-em-polígono (ray casting). */
   function pointInPolygon(x, y, polygon) {
     let inside = false;
     for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
@@ -131,24 +131,6 @@
     return inside;
   }
 
-  /** Converte clientX/Y em fração da imagem e devolve o hotspot correspondente. */
-  function hotspotAt(clientX, clientY) {
-    const rect = canvas.getBoundingClientRect();
-    const x = (clientX - rect.left) / rect.width;
-    const y = (clientY - rect.top) / rect.height;
-    if (x < 0 || x > 1 || y < 0 || y > 1) return null;
-    // Histerese: se o cursor ainda está sobre o hotspot ativo (com uma
-    // pequena margem), mantém a seleção — evita "pulos" na borda.
-    if (activeHotspot && pointInPolygon(x, y, expandedPolygon(activeHotspot))) {
-      return activeHotspot;
-    }
-    for (const h of HOTSPOTS) {
-      if (pointInPolygon(x, y, h.polygon)) return h;
-    }
-    return null;
-  }
-
-  /** Polígono levemente expandido a partir do centro (margem de tolerância). */
   const expandedCache = new WeakMap();
   function expandedPolygon(hotspot) {
     const margin = 0.01 + (1 - precision) * 0.05;
@@ -166,115 +148,199 @@
     return polygon;
   }
 
+  function hotspotAt(clientX, clientY) {
+    const rect = canvas.getBoundingClientRect();
+    const x = (clientX - rect.left) / rect.width;
+    const y = (clientY - rect.top) / rect.height;
+    if (x < 0 || x > 1 || y < 0 || y > 1) return null;
+    if (hovered && pointInPolygon(x, y, expandedPolygon(hovered))) return hovered;
+    for (const h of HOTSPOTS) {
+      if (pointInPolygon(x, y, h.polygon)) return h;
+    }
+    return null;
+  }
 
   // ---------- Renderização ----------
 
-  function drawFrame(frameNumber, hotspot) {
-    const img = resolveFrame(frameNumber, hotspot);
-    if (!img) return;
-
+  function ensureCanvasSize(img) {
     if (canvas.width !== img.naturalWidth || canvas.height !== img.naturalHeight) {
       canvas.width = img.naturalWidth;
       canvas.height = img.naturalHeight;
     }
-
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-    currentFrame = frameNumber;
   }
 
-  /**
-   * Loop: avança o playhead em direção ao alvo (fim da sequência enquanto o
-   * cursor está sobre o objeto; início quando sai) e só redesenha quando o
-   * frame inteiro muda.
-   */
-  function tick(now) {
-    rafId = null;
-    const dt = lastTime === null ? 0 : Math.min(0.1, (now - lastTime) / 1000);
-    lastTime = now;
+  function drawStatic(frameNumber, hotspot) {
+    const key = `s:${frameNumber}`;
+    if (key === lastDrawKey) return;
+    const img = resolveFrame(frameNumber, hotspot);
+    if (!img) return;
+    ensureCanvasSize(img);
+    ctx.globalAlpha = 1;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    lastDrawKey = key;
+  }
 
-    if (!playingHotspot) {
-      if (currentFrame !== CONFIG.baseFrame) drawFrame(CONFIG.baseFrame, null);
-      lastTime = null;
+  /** Desenha a posição fracionária da sequência com crossfade entre vizinhos. */
+  function drawSequence(s) {
+    const h = s.hotspot;
+    const idx = Math.floor(s.pos);
+    const frac = s.pos - idx;
+    const fa = h.start + idx;
+    const fb = Math.min(h.end, fa + 1);
+
+    if (!CONFIG.crossfade || fb === fa || frac < 0.02) {
+      drawStatic(fa, h);
+      return;
+    }
+    if (frac > 0.98) {
+      drawStatic(fb, h);
       return;
     }
 
-    const length = playingHotspot.end - playingHotspot.start;
-    const target = activeHotspot === playingHotspot ? length : 0;
-    const diff = target - playhead;
-
-    // Suavização exponencial (ease-out): rápido no início, desacelera ao
-    // chegar no alvo e para totalmente — o quadro final fica estático.
-    const rate = CONFIG.fps * speed * 0.22; // constante de suavização
-    const eased = diff * (1 - Math.exp(-rate * dt));
-    const minStep = CONFIG.fps * speed * 0.15 * dt; // evita ficar lento demais
-    let delta = Math.abs(eased) < minStep ? Math.sign(diff) * minStep : eased;
-    if (Math.abs(delta) > Math.abs(diff)) delta = diff;
-
-    if (Math.abs(diff) <= 0.02) playhead = target;
-    else playhead += delta;
-
-
-    const frameNumber = playingHotspot.start + Math.round(playhead);
-    if (frameNumber !== currentFrame) drawFrame(frameNumber, playingHotspot);
-
-    if (playhead !== target) {
-      scheduleRender();
-    } else if (target === 0 && activeHotspot !== playingHotspot) {
-      // sequência voltou ao início: libera para o próximo objeto
-      playingHotspot = null;
-      lastTime = null;
-      if (activeHotspot) startHotspot(activeHotspot);
-      else if (currentFrame !== CONFIG.baseFrame) drawFrame(CONFIG.baseFrame, null);
-    } else {
-      lastTime = null;
+    const key = `x:${fa}:${Math.round(frac * 64)}`;
+    if (key === lastDrawKey) return;
+    const a = resolveFrame(fa, h);
+    const b = resolveFrame(fb, h);
+    if (!a) return;
+    ensureCanvasSize(a);
+    ctx.globalAlpha = 1;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(a, 0, 0, canvas.width, canvas.height);
+    if (b && b !== a) {
+      ctx.globalAlpha = frac;
+      ctx.drawImage(b, 0, 0, canvas.width, canvas.height);
+      ctx.globalAlpha = 1;
     }
+    lastDrawKey = key;
   }
+
+  // ---------- Máquina de estados / loop ----------
 
   function scheduleRender() {
     if (rafId !== null) return;
     rafId = requestAnimationFrame(tick);
   }
 
-  function startHotspot(hotspot) {
-    playingHotspot = hotspot;
-    playhead = 0;
+  function startSequence(hotspot) {
+    seq = {
+      hotspot,
+      state: STATE.PLAYING_TO_PAUSE,
+      pos: 0,
+      skipPause: hovered !== hotspot, // saiu antes de chegar à pausa → vai direto ao fim
+      rush: false,
+    };
     lastTime = null;
     scheduleRender();
   }
 
-  // ---------- Interação ----------
+  function tick(now) {
+    rafId = null;
 
-  let pendingHotspot = null;
-  let pendingTimer = null;
-
-  function commitHotspot(hotspot) {
-    if (hotspot === activeHotspot) return;
-    activeHotspot = hotspot;
-    container.classList.toggle("over-hotspot", !!hotspot);
-    if (hotspot) container.classList.add("interacted");
-
-    if (!playingHotspot) {
-      if (hotspot) startHotspot(hotspot);
+    if (!seq) {
+      drawStatic(CONFIG.baseFrame, null);
+      lastTime = null;
       return;
     }
 
-    if (hotspot && hotspot !== playingHotspot && playhead === 0) {
-      // sequência anterior já estava no início: troca imediatamente
-      startHotspot(hotspot);
-      return;
+    const dt = lastTime === null ? 0 : Math.min(100, now - lastTime);
+    lastTime = now;
+
+    const h = seq.hotspot;
+    const pauseIdx = h.pause - h.start;
+    const endIdx = h.end - h.start;
+    const playing = seq.state === STATE.PLAYING_TO_PAUSE || seq.state === STATE.PLAYING_TO_END;
+
+    if (playing) {
+      const durPerFrame = CONFIG.frameDuration / speed / (seq.rush ? CONFIG.rushFactor : 1);
+      seq.pos += dt / durPerFrame;
+
+      if (seq.state === STATE.PLAYING_TO_PAUSE && !seq.skipPause && seq.pos >= pauseIdx) {
+        seq.pos = pauseIdx;
+        seq.state = STATE.PAUSED_AT_TARGET;   // congela: nada avança
+      } else if (seq.pos >= endIdx) {
+        seq.pos = endIdx;
+        seq.state = STATE.FINISHED;
+      }
     }
 
-    // caso contrário o loop cuida: rebobina a atual e depois inicia a nova
+    drawSequence(seq);
+
+    if (seq.state === STATE.FINISHED) {
+      lastTime = null;
+      if (pendingStart) {
+        const next = pendingStart;
+        pendingStart = null;
+        startSequence(next);
+      }
+      return; // permanece estático no último frame
+    }
+
+    if (seq.state === STATE.PAUSED_AT_TARGET) {
+      lastTime = null;
+      return; // permanece estático no frame de pausa
+    }
+
     scheduleRender();
   }
 
-  /**
-   * Só confirma a mudança se o cursor permanecer na nova região por um
-   * curto período — impede que os elementos fiquem pulando.
-   */
-  function setActiveHotspot(hotspot) {
-    if (hotspot === activeHotspot) {
+  // ---------- Eventos de hover (enter / leave derivados) ----------
+
+  function onHotspotEnter(hotspot) {
+    if (!seq) {
+      startSequence(hotspot);
+      return;
+    }
+
+    if (seq.hotspot === hotspot) {
+      // voltou ao mesmo objeto: só reinicia se já tiver terminado
+      if (seq.state === STATE.FINISHED) startSequence(hotspot);
+      return;
+    }
+
+    if (seq.state === STATE.FINISHED) {
+      startSequence(hotspot);
+      return;
+    }
+
+    // outro objeto ainda em movimento: encerra o atual (mais rápido) e depois inicia o novo
+    pendingStart = hotspot;
+    seq.rush = true;
+    if (seq.state === STATE.PAUSED_AT_TARGET) seq.state = STATE.PLAYING_TO_END;
+    else if (seq.state === STATE.PLAYING_TO_PAUSE) seq.skipPause = true;
+    scheduleRender();
+  }
+
+  function onHotspotLeave(hotspot) {
+    if (pendingStart === hotspot) pendingStart = null;
+    if (!seq || seq.hotspot !== hotspot) return;
+
+    if (seq.state === STATE.PAUSED_AT_TARGET) {
+      seq.state = STATE.PLAYING_TO_END;  // continua do frame de pausa até o fim
+      lastTime = null;
+      scheduleRender();
+    } else if (seq.state === STATE.PLAYING_TO_PAUSE) {
+      seq.skipPause = true;              // ainda não chegou à pausa: segue até o fim
+    }
+  }
+
+  function commitHotspot(hotspot) {
+    if (hotspot === hovered) return;
+    const previous = hovered;
+    hovered = hotspot;
+    container.classList.toggle("over-hotspot", !!hotspot);
+    if (hotspot) container.classList.add("interacted");
+
+    if (previous) onHotspotLeave(previous);
+    if (hotspot) onHotspotEnter(hotspot);
+  }
+
+  // Estabilização temporal: confirma a troca só se o cursor permanecer na região.
+  let pendingHotspot = null;
+  let pendingTimer = null;
+
+  function setHoveredHotspot(hotspot) {
+    if (hotspot === hovered) {
       pendingHotspot = null;
       if (pendingTimer !== null) {
         clearTimeout(pendingTimer);
@@ -287,8 +353,7 @@
     pendingHotspot = hotspot;
     if (pendingTimer !== null) clearTimeout(pendingTimer);
 
-    // entrar a partir do repouso é imediato; sair ou trocar tem carência
-    const delay = activeHotspot === null ? 0 : 70 + (1 - precision) * 260;
+    const delay = hovered === null ? 0 : 70 + (1 - precision) * 260;
     pendingTimer = window.setTimeout(() => {
       pendingTimer = null;
       commitHotspot(pendingHotspot);
@@ -296,22 +361,22 @@
   }
 
   function handlePointer(clientX, clientY) {
-    setActiveHotspot(hotspotAt(clientX, clientY));
+    // mousemove serve apenas para saber SOBRE QUAL região o cursor está;
+    // enter/leave são disparados somente quando a região muda.
+    setHoveredHotspot(hotspotAt(clientX, clientY));
   }
-
 
   function bindEvents() {
     container.addEventListener("mousemove", (e) => handlePointer(e.clientX, e.clientY), { passive: true });
-    container.addEventListener("mouseleave", () => setActiveHotspot(null), { passive: true });
+    container.addEventListener("mouseleave", () => setHoveredHotspot(null), { passive: true });
 
-    // Toque: tocar/arrastar sobre um objeto dispara sua sequência
     const touch = (e) => {
       if (e.touches.length > 0) handlePointer(e.touches[0].clientX, e.touches[0].clientY);
     };
     container.addEventListener("touchstart", touch, { passive: true });
     container.addEventListener("touchmove", touch, { passive: true });
-    container.addEventListener("touchend", () => setActiveHotspot(null), { passive: true });
-    container.addEventListener("touchcancel", () => setActiveHotspot(null), { passive: true });
+    container.addEventListener("touchend", () => setHoveredHotspot(null), { passive: true });
+    container.addEventListener("touchcancel", () => setHoveredHotspot(null), { passive: true });
   }
 
   // ---------- Painel de ajustes ----------
@@ -395,7 +460,7 @@
     await preloadFrames();
 
     loader.classList.add("hidden");
-    drawFrame(CONFIG.baseFrame, null);
+    drawStatic(CONFIG.baseFrame, null);
     bindEvents();
   }
 
