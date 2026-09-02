@@ -17,7 +17,7 @@
     prefix: "ezgif-frame-",       // prefixo do nome do arquivo
     extension: ".jpg",            // extensão (frames otimizados para web)
     frameStart: 25,               // ezgif-frame-025
-    frameEnd: 191,                // último frame disponível no upload (spec original: 232)
+    frameEnd: 232,                // ezgif-frame-232 (sequência completa)
     padLength: 3,                 // ezgif-frame-XXX
   };
 
