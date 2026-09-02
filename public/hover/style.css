@@ -24,9 +24,14 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  cursor: ew-resize;
+  cursor: default;
   user-select: none;
   touch-action: none; /* permite controlar via toque também */
+}
+
+/* Hotspots são invisíveis; apenas o cursor muda ao passar sobre um objeto */
+#animation-container.over-hotspot {
+  cursor: pointer;
 }
 
 /* O canvas mantém a proporção 16:9 e nunca ultrapassa a viewport */
