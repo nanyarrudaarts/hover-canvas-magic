@@ -137,11 +137,35 @@
     const x = (clientX - rect.left) / rect.width;
     const y = (clientY - rect.top) / rect.height;
     if (x < 0 || x > 1 || y < 0 || y > 1) return null;
+    // Histerese: se o cursor ainda está sobre o hotspot ativo (com uma
+    // pequena margem), mantém a seleção — evita "pulos" na borda.
+    if (activeHotspot && pointInPolygon(x, y, expandedPolygon(activeHotspot))) {
+      return activeHotspot;
+    }
     for (const h of HOTSPOTS) {
       if (pointInPolygon(x, y, h.polygon)) return h;
     }
     return null;
   }
+
+  /** Polígono levemente expandido a partir do centro (margem de tolerância). */
+  const expandedCache = new WeakMap();
+  function expandedPolygon(hotspot) {
+    const margin = 0.01 + (1 - precision) * 0.05;
+    const cached = expandedCache.get(hotspot);
+    if (cached && cached.margin === margin) return cached.polygon;
+    const cx = hotspot.polygon.reduce((s, p) => s + p[0], 0) / hotspot.polygon.length;
+    const cy = hotspot.polygon.reduce((s, p) => s + p[1], 0) / hotspot.polygon.length;
+    const polygon = hotspot.polygon.map(([px, py]) => {
+      const dx = px - cx;
+      const dy = py - cy;
+      const len = Math.hypot(dx, dy) || 1;
+      return [px + (dx / len) * margin, py + (dy / len) * margin];
+    });
+    expandedCache.set(hotspot, { margin, polygon });
+    return polygon;
+  }
+
 
   // ---------- Renderização ----------
 
@@ -179,15 +203,17 @@
     const target = activeHotspot === playingHotspot ? length : 0;
     const diff = target - playhead;
 
-    // passo linear (frames/s) com suavização opcional perto do alvo
-    let step = CONFIG.fps * speed * dt;
-    if (precision < 1) {
-      const ease = clamp(Math.abs(diff) / 8, 0.08, 1);
-      step *= precision + (1 - precision) * ease;
-    }
+    // Suavização exponencial (ease-out): rápido no início, desacelera ao
+    // chegar no alvo e para totalmente — o quadro final fica estático.
+    const rate = CONFIG.fps * speed * 0.22; // constante de suavização
+    const eased = diff * (1 - Math.exp(-rate * dt));
+    const minStep = CONFIG.fps * speed * 0.15 * dt; // evita ficar lento demais
+    let delta = Math.abs(eased) < minStep ? Math.sign(diff) * minStep : eased;
+    if (Math.abs(delta) > Math.abs(diff)) delta = diff;
 
-    if (Math.abs(diff) <= step) playhead = target;
-    else playhead += Math.sign(diff) * step;
+    if (Math.abs(diff) <= 0.02) playhead = target;
+    else playhead += delta;
+
 
     const frameNumber = playingHotspot.start + Math.round(playhead);
     if (frameNumber !== currentFrame) drawFrame(frameNumber, playingHotspot);
@@ -219,7 +245,10 @@
 
   // ---------- Interação ----------
 
-  function setActiveHotspot(hotspot) {
+  let pendingHotspot = null;
+  let pendingTimer = null;
+
+  function commitHotspot(hotspot) {
     if (hotspot === activeHotspot) return;
     activeHotspot = hotspot;
     container.classList.toggle("over-hotspot", !!hotspot);
@@ -240,9 +269,36 @@
     scheduleRender();
   }
 
+  /**
+   * Só confirma a mudança se o cursor permanecer na nova região por um
+   * curto período — impede que os elementos fiquem pulando.
+   */
+  function setActiveHotspot(hotspot) {
+    if (hotspot === activeHotspot) {
+      pendingHotspot = null;
+      if (pendingTimer !== null) {
+        clearTimeout(pendingTimer);
+        pendingTimer = null;
+      }
+      return;
+    }
+    if (hotspot === pendingHotspot) return;
+
+    pendingHotspot = hotspot;
+    if (pendingTimer !== null) clearTimeout(pendingTimer);
+
+    // entrar a partir do repouso é imediato; sair ou trocar tem carência
+    const delay = activeHotspot === null ? 0 : 70 + (1 - precision) * 260;
+    pendingTimer = window.setTimeout(() => {
+      pendingTimer = null;
+      commitHotspot(pendingHotspot);
+    }, delay);
+  }
+
   function handlePointer(clientX, clientY) {
     setActiveHotspot(hotspotAt(clientX, clientY));
   }
+
 
   function bindEvents() {
     container.addEventListener("mousemove", (e) => handlePointer(e.clientX, e.clientY), { passive: true });
