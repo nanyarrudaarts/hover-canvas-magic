@@ -244,12 +244,14 @@
   // ---------- Inicialização ----------
 
   async function init() {
+    bindControls();
     await preloadFrames();
 
     loader.classList.add("hidden");
     drawFrame(0); // frame inicial (ezgif-frame-025)
     bindEvents();
   }
+
 
   init();
 })();
