@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Art Mail Club — Hover Animation</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <main id="animation-container" aria-label="Animação controlada pelo movimento do mouse">
+    <canvas id="animation-canvas" width="1600" height="900"></canvas>
+
+    <div id="loader" role="status" aria-live="polite">
+      <div class="loader-bar"><span id="loader-fill"></span></div>
+      <p id="loader-text">Carregando frames… 0%</p>
+    </div>
+
+    <p id="hint">Mova o mouse na horizontal para controlar a animação</p>
+  </main>
+
+  <script src="script.js" defer></script>
+</body>
+</html>

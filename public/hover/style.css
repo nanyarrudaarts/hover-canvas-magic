@@ -1,0 +1,104 @@
+/* ---------- Reset / base ---------- */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  height: 100%;
+  background: #cc6b74; /* mesma cor de fundo dos frames */
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: #fff;
+  overflow: hidden;
+}
+
+/* ---------- Contêiner centralizado e responsivo ---------- */
+#animation-container {
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: ew-resize;
+  user-select: none;
+  touch-action: none; /* permite controlar via toque também */
+}
+
+/* O canvas mantém a proporção 16:9 e nunca ultrapassa a viewport */
+#animation-canvas {
+  display: block;
+  width: min(100vw, calc(100vh * 16 / 9));
+  height: auto;
+  aspect-ratio: 16 / 9;
+  max-height: 100vh;
+}
+
+/* ---------- Loader ---------- */
+#loader {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  background: rgba(204, 107, 116, 0.92);
+  transition: opacity 0.4s ease;
+}
+
+#loader.hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.loader-bar {
+  width: min(280px, 70vw);
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.25);
+  overflow: hidden;
+}
+
+#loader-fill {
+  display: block;
+  width: 0%;
+  height: 100%;
+  background: #fff;
+  transition: width 0.15s linear;
+}
+
+#loader-text {
+  font-size: 0.85rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+/* ---------- Dica ---------- */
+#hint {
+  position: absolute;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 0.75rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  opacity: 0.75;
+  pointer-events: none;
+  transition: opacity 0.5s ease;
+}
+
+#animation-container.interacted #hint {
+  opacity: 0;
+}
+
+@media (max-width: 600px) {
+  #hint {
+    font-size: 0.65rem;
+    bottom: 16px;
+  }
+}
